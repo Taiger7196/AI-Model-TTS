@@ -27,7 +27,8 @@ class SpeakerEncoder(nn.Module):
             d_model=d, nhead=cfg.spk_heads, dim_feedforward=d * 4,
             batch_first=True, norm_first=True,
         )
-        self.tr = nn.TransformerEncoder(layer, num_layers=cfg.spk_layers)
+        self.tr = nn.TransformerEncoder(layer, num_layers=cfg.spk_layers,
+                                        enable_nested_tensor=False)
         self.pool = nn.Linear(d, 1)
         self.proj = nn.Linear(d, cfg.d_model)
 
