@@ -84,6 +84,7 @@ class LibriTTSDataset(Dataset):
         self.cfg = cfg
         self.tok = CharTokenizer()
         self.front = MelFrontend(cfg)
+        os.makedirs(root, exist_ok=True)  # torchaudio won't create root for download
         self.ds = torchaudio.datasets.LIBRITTS(root=root, url=url, download=download)
         mi = cfg.max_items if max_items is None else max_items
         self.n = len(self.ds) if mi is None else min(len(self.ds), mi)
