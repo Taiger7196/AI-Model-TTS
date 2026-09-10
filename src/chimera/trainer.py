@@ -40,6 +40,8 @@ class AcousticTrainer:
     def __init__(self, cfg, model: nn.Module, train_loader, val_loader, device):
         self.cfg = cfg
         self.device = device
+        self.train_loader = train_loader
+        self.val_loader = val_loader
         if device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             try:
@@ -50,7 +52,6 @@ class AcousticTrainer:
         model = model.to(device)
         if cfg.compile:
             try:
-                import torch._dynamo
                 torch._dynamo.config.cache_size_limit = 64
                 model = torch.compile(model, mode="default")
                 print("[perf] torch.compile ON")
