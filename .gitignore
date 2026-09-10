@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+checkpoints/
+data/
+samples/
+*.pt
+*.bin
+*.wav
+*.mp3
+.DS_Store

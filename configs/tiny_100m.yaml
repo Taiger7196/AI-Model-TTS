@@ -1,0 +1,44 @@
+# CHIMERA tiny prototype — fits Colab T4 free (16GB VRAM)
+name: chimera-tiny
+target: mel
+
+vocab_size: 256
+max_text_len: 256
+
+sample_rate: 22050
+n_fft: 1024
+hop_length: 256
+n_mel: 80
+max_mel_len: 768
+max_codec_len: 1024
+
+d_model: 768
+n_layers: 12
+n_heads: 12
+n_kv_heads: 4
+d_ff: 2048
+dropout: 0.0
+rope_theta: 10000.0
+grad_checkpoint: true
+
+spk_d_model: 256
+spk_layers: 4
+spk_heads: 4
+
+n_codebooks: 4
+codebook_size: 1024
+
+lr: 0.0002
+weight_decay: 0.01
+warmup_steps: 500
+max_steps: 20000
+batch_size: 8
+grad_accum: 2
+grad_clip: 1.0
+amp: true
+num_workers: 2
+log_every: 25
+ckpt_every: 1000
+sample_every: 1000
+out_dir: checkpoints/chimera-tiny
+seed: 1337
