@@ -66,6 +66,9 @@ cd AI-Model-TTS && git checkout arena/01a08c88-ai-model-tts
 pip install -r requirements.txt
 
 python scripts/count_params.py
+# TURBO-FLASH overfit demo: hear cloning in ~20 min on T4
+python scripts/train.py --config configs/turbo.yaml
+# Full prototype run
 python scripts/train.py --config configs/tiny_100m.yaml --max-items 2000 --max-steps 2000
 python scripts/synth.py --ckpt checkpoints/chimera-tiny/step_000XXX.pt \
     --ref myvoice.wav --text "chimera speaks" --out out.wav

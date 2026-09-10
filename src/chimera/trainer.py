@@ -1,13 +1,18 @@
-"""Training loop: AMP + grad accumulation + warmup/cosine + checkpoint resume + audio samples."""
+"""Training loop: AMP + grad accumulation + warmup/cosine + checkpoint resume + audio samples.
+
+Turbo upgrades: torch.compile, fused AdamW, flash-SDP, cudnn benchmark,
+pinned/non-blocking transfers, disk-cached data, live it/s + ETA.
+"""
 from __future__ import annotations
 
 import math
-import os
 import random
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch._dynamo
 import torch.nn as nn
 
 from .data import GriffinLimVocoder
@@ -34,12 +39,36 @@ def build_scheduler(opt, cfg):
 class AcousticTrainer:
     def __init__(self, cfg, model: nn.Module, train_loader, val_loader, device):
         self.cfg = cfg
-        self.model = model.to(device)
-        self.train_loader = train_loader
-        self.val_loader = val_loader
         self.device = device
-        self.opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
-                                     betas=(0.9, 0.95), weight_decay=cfg.weight_decay)
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+            except Exception:
+                pass
+        model = model.to(device)
+        if cfg.compile:
+            try:
+                import torch._dynamo
+                torch._dynamo.config.cache_size_limit = 64
+                model = torch.compile(model, mode="default")
+                print("[perf] torch.compile ON")
+            except Exception as e:
+                print(f"[perf] torch.compile failed, eager fallback: {e}")
+        self.model = model
+        try:
+            self.opt = torch.optim.AdamW(
+                model.parameters(), lr=cfg.lr, betas=(0.9, 0.95),
+                weight_decay=cfg.weight_decay,
+                fused=cfg.fused_opt and device.type == "cuda")
+            if cfg.fused_opt and device.type == "cuda":
+                print("[perf] fused AdamW ON")
+        except Exception as e:
+            self.opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
+                                         betas=(0.9, 0.95),
+                                         weight_decay=cfg.weight_decay)
+            print(f"[perf] standard AdamW ({e})")
         self.sched = build_scheduler(self.opt, cfg)
         self.use_amp = cfg.amp and device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
@@ -49,16 +78,20 @@ class AcousticTrainer:
         (self.out / "samples").mkdir(exist_ok=True)
         self.step = 0
 
+    def _raw_model(self) -> nn.Module:
+        return getattr(self.model, "_orig_mod", self.model)
+
     def save(self, name: str | None = None):
         path = self.out / (name or f"step_{self.step:06d}.pt")
-        torch.save({"step": self.step, "model": self.model.state_dict(),
+        torch.save({"step": self.step, "model": self._raw_model().state_dict(),
                     "opt": self.opt.state_dict(), "sched": self.sched.state_dict(),
                     "scaler": self.scaler.state_dict()}, path)
         print(f"[ckpt] saved {path}")
 
     def load(self, path: str):
         ck = torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ck["model"])
+        sd = {k.replace("_orig_mod.", ""): v for k, v in ck["model"].items()}
+        self._raw_model().load_state_dict(sd)
         self.opt.load_state_dict(ck["opt"])
         self.sched.load_state_dict(ck["sched"])
         self.scaler.load_state_dict(ck["scaler"])
@@ -70,7 +103,8 @@ class AcousticTrainer:
         """Generate one fixed validation sample so you can HEAR overfitting happen."""
         import soundfile as sf
 
-        self.model.eval()
+        raw = self._raw_model()  # never run AR generate through compiled graph
+        raw.eval()
         try:
             batch = next(iter(self.val_loader))
             if batch is None:
@@ -78,7 +112,7 @@ class AcousticTrainer:
             text_ids = batch["text_ids"][:1].to(self.device)
             ref = batch["ref_mel"][:1].to(self.device)
             tgt = batch["mel"][:1]
-            gen = self.model.generate_mel(text_ids, ref, max_len=400)
+            gen = raw.generate_mel(text_ids, ref, max_len=self.cfg.sample_len)
             wav_g = self.vocoder(gen.cpu()).squeeze(0).numpy()
             wav_t = self.vocoder(tgt).squeeze(0).numpy()
             sr = self.cfg.sample_rate
@@ -89,13 +123,14 @@ class AcousticTrainer:
         except Exception as e:
             print(f"[sample] skipped: {e}")
         finally:
-            self.model.train()
+            raw.train()
 
     def train(self):
         cfg = self.cfg
-        self.model.train()
+        self._raw_model().train()
         it = iter(self.train_loader)
         self.opt.zero_grad(set_to_none=True)
+        t_last = time.time()
         while self.step < cfg.max_steps:
             try:
                 batch = next(it)
@@ -104,10 +139,10 @@ class AcousticTrainer:
                 batch = next(it)
             if batch is None:
                 continue
-            text_ids = batch["text_ids"].to(self.device)
-            mel = batch["mel"].to(self.device)
-            mel_len = batch["mel_len"].to(self.device)
-            ref = batch["ref_mel"].to(self.device)
+            text_ids = batch["text_ids"].to(self.device, non_blocking=True)
+            mel = batch["mel"].to(self.device, non_blocking=True)
+            mel_len = batch["mel_len"].to(self.device, non_blocking=True)
+            ref = batch["ref_mel"].to(self.device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=self.use_amp):
                 out = self.model(text_ids, ref, mel=mel, mel_len=mel_len)
@@ -123,11 +158,19 @@ class AcousticTrainer:
                 self.opt.zero_grad(set_to_none=True)
 
             if self.step % cfg.log_every == 0:
-                l1 = float(out.get("l1", out["loss"]))
-                st = float(out.get("stop", 0.0))
+                now = time.time()
+                dt = now - t_last
+                t_last = now
+                it_s = (cfg.log_every / dt) if self.step > 0 and dt > 0 else 0.0
+                eta = (cfg.max_steps - self.step) / it_s if it_s > 0 else float("inf")
+                eta_s = f"{eta/3600:.1f}h" if eta != float("inf") else "?"
+                l1 = float(out.get("l1", out["loss"]).detach())
+                st = out.get("stop", 0.0)
+                st = float(st.detach()) if torch.is_tensor(st) else 0.0
                 lr = self.sched.get_last_lr()[0]
                 print(f"[step {self.step:06d}] loss={float(out['loss'].detach()):.4f} "
-                      f"l1={l1:.4f} stop={st:.4f} lr={lr:.2e}", flush=True)
+                      f"l1={l1:.4f} stop={st:.4f} lr={lr:.2e} "
+                      f"{it_s:.2f}it/s ETA {eta_s}", flush=True)
 
             self.step += 1
             if self.step % cfg.ckpt_every == 0:

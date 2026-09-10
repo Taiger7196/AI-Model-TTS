@@ -4,9 +4,13 @@ Phase-0 keeps it simple on purpose:
 - char-level tokenizer (upgrade to phoneme/BPE in phase-1)
 - self-reference crops (upgrade to cross-utterance same-speaker refs in phase-1)
 - Griffin-Lim waveform (upgrade to trained HiFi-GAN in phase-1)
+
+Turbo: preprocessed items are cached to disk (.pt) — first epoch pays,
+every later run/epoch loads instantly.
 """
 from __future__ import annotations
 
+import os
 import random
 
 import torch
@@ -74,22 +78,29 @@ class GriffinLimVocoder:
 
 class LibriTTSDataset(Dataset):
     def __init__(self, cfg, root: str = "data", url: str = "dev-clean",
-                 download: bool = True, max_sec: float = 12.0,
-                 max_items: int | None = None, ref_sec: float = 3.0):
+                 download: bool = True, max_items: int | None = None,
+                 ref_sec: float = 3.0):
         super().__init__()
         self.cfg = cfg
         self.tok = CharTokenizer()
         self.front = MelFrontend(cfg)
         self.ds = torchaudio.datasets.LIBRITTS(root=root, url=url, download=download)
-        self.n = len(self.ds) if max_items is None else min(len(self.ds), max_items)
-        self.max_sec = max_sec
+        mi = cfg.max_items if max_items is None else max_items
+        self.n = len(self.ds) if mi is None else min(len(self.ds), mi)
+        self.max_sec = cfg.max_sec
         self.ref_frames = int(ref_sec * cfg.sample_rate / cfg.hop_length)
-        print(f"[data] LIBRITTS {url}: {len(self.ds)} utterances, using {self.n}")
+        self.use_cache = cfg.cache_data
+        self.cache_dir = os.path.join(
+            root, "cache", f"{url}_sr{cfg.sample_rate}_mel{cfg.n_mel}_hop{cfg.hop_length}")
+        if self.use_cache:
+            os.makedirs(self.cache_dir, exist_ok=True)
+        print(f"[data] LIBRITTS {url}: {len(self.ds)} utterances, using {self.n} "
+              f"(max {self.max_sec}s, cache={'on' if self.use_cache else 'off'})")
 
     def __len__(self):
         return self.n
 
-    def __getitem__(self, i):
+    def _process(self, i):
         wav, sr, text, *_ = self.ds[i]
         if not text or not text.strip():
             return None
@@ -110,6 +121,22 @@ class LibriTTSDataset(Dataset):
         return {"text": torch.tensor(ids, dtype=torch.long),
                 "mel": mel, "ref": ref}
 
+    def __getitem__(self, i):
+        if not self.use_cache:
+            return self._process(i)
+        p = os.path.join(self.cache_dir, f"{i}.pt")
+        if os.path.exists(p):
+            try:
+                return torch.load(p, weights_only=True)
+            except Exception:
+                pass
+        d = self._process(i)
+        try:
+            torch.save(d, p)
+        except Exception:
+            pass
+        return d
+
 
 def collate(batch):
     batch = [b for b in batch if b is not None]
@@ -129,11 +156,16 @@ def collate(batch):
 
 def get_loaders(cfg, root: str = "data", url: str = "dev-clean",
                 max_items: int | None = None):
-    train_ds = LibriTTSDataset(cfg, root=root, url=url, max_items=max_items)
+    mi = cfg.max_items if max_items is None else max_items
+    train_ds = LibriTTSDataset(cfg, root=root, url=url, max_items=mi)
     val_ds = LibriTTSDataset(cfg, root=root, url=url, download=False, max_items=8)
-    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
-                              num_workers=cfg.num_workers, collate_fn=collate,
-                              drop_last=True)
+    use_pin = cfg.pin_memory and torch.cuda.is_available()
+    nw = cfg.num_workers
+    loader_kw: dict = dict(batch_size=cfg.batch_size, shuffle=True, num_workers=nw,
+                           collate_fn=collate, drop_last=True, pin_memory=use_pin)
+    if nw > 0:
+        loader_kw.update(persistent_workers=True, prefetch_factor=2)
+    train_loader = DataLoader(train_ds, **loader_kw)
     val_loader = DataLoader(val_ds, batch_size=4, shuffle=False,
                             num_workers=0, collate_fn=collate)
     return train_loader, val_loader

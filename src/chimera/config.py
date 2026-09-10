@@ -40,6 +40,15 @@ class ChimeraConfig:
     n_codebooks: int = 4
     codebook_size: int = 1024
 
+    # performance (turbo)
+    compile: bool = False
+    cache_data: bool = True
+    pin_memory: bool = True
+    fused_opt: bool = True
+    max_sec: float = 12.0
+    sample_len: int = 400
+    max_items: int | None = None
+
     # training
     lr: float = 2e-4
     weight_decay: float = 0.01

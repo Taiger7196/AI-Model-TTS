@@ -1,0 +1,55 @@
+# CHIMERA TURBO-FLASH — max speed overfit demo for Colab T4 free.
+# 256 utterances, short clips, big batch, compiled. Hear cloning in ~20 min.
+# Run: python scripts/train.py --config configs/turbo.yaml
+name: chimera-turbo
+target: mel
+
+vocab_size: 256
+max_text_len: 256
+
+sample_rate: 22050
+n_fft: 1024
+hop_length: 256
+n_mel: 80
+max_mel_len: 768
+max_codec_len: 1024
+
+d_model: 768
+n_layers: 12
+n_heads: 12
+n_kv_heads: 4
+d_ff: 2048
+dropout: 0.0
+rope_theta: 10000.0
+grad_checkpoint: false
+
+spk_d_model: 256
+spk_layers: 4
+spk_heads: 4
+
+n_codebooks: 4
+codebook_size: 1024
+
+# perf
+compile: true
+cache_data: true
+pin_memory: true
+fused_opt: true
+max_sec: 6.0
+sample_len: 300
+max_items: 256
+
+lr: 0.0003
+weight_decay: 0.01
+warmup_steps: 200
+max_steps: 1500
+batch_size: 16
+grad_accum: 1
+grad_clip: 1.0
+amp: true
+num_workers: 2
+log_every: 20
+ckpt_every: 500
+sample_every: 300
+out_dir: checkpoints/chimera-turbo
+seed: 1337
