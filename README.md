@@ -66,6 +66,8 @@ cd AI-Model-TTS && git checkout arena/01a08c88-ai-model-tts
 pip install -r requirements.txt
 
 python scripts/count_params.py
+# FLASH demo (~10 min on T4): hear cloning fast
+python scripts/train.py --config configs/flash.yaml
 # TURBO-FLASH overfit demo: hear cloning in ~20 min on T4
 python scripts/train.py --config configs/turbo.yaml
 # Full prototype run
